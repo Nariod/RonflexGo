@@ -12,7 +12,9 @@ RonflexGo tries to suspend all known AV/EDRs and other security product processe
 - [x] Write PROCEXP driver to disk
 - [x] Create the appropriate registry keys to load the driver
 - [x] Get all privileges using [wintoken](https://github.com/fourcorelabs/wintoken) 
-- [ ] Load the PROCEXP driver using NtLoadDriver
+- [x] Load the PROCEXP driver using NtLoadDriver
+- [ ] Call the driver using DeviceIoControl
+- [ ] Suspend all target processes 
 
 
 # Quick start
