@@ -16,6 +16,7 @@ RonflexGo tries to suspend all known AV/EDRs and other security product processe
 - [ ] Call the driver using DeviceIoControl
 - [ ] Suspend all target processes 
 - [ ] Update the PROCEXP driver to the latest one
+- [ ] Move all Windows calls to indirect syscalls. Bananaphone maybe ?
 
 
 # Quick start
